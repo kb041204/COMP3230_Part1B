@@ -4,8 +4,8 @@
 File name:	part1b-mandelbrot.c 
 Name:		Chan Tik Shun
 Student ID:	3035536553
-Date: 		31/10/2019 
-Version: 	1.0
+Date: 		1/11/2019 
+Version: 	1.1
 Platform:	X2GO (Xfce 4.12, distributed by Xubuntu)
 Compilation:	gcc part1b-mandelbrot.c -o part1b-mandelbrot -l SDL2 -l m
 */
@@ -36,7 +36,6 @@ typedef struct message {
 	float rowdata[IMAGE_WIDTH];
 } MSG;
 
-
 int task_completed = 0; //global variable for child
 void sigusr1_handler(int signum) { //signal handler for SIGUSR1
 
@@ -45,36 +44,38 @@ void sigusr1_handler(int signum) { //signal handler for SIGUSR1
 
 	TASK * curr_task = malloc(sizeof(*curr_task));
 
-	read(task_pipe[0], curr_task, sizeof(*curr_task));
-
-	if(curr_task->num_of_rows == 0) return; // WITHOUT THIS LINE, IT HAS BUG
+	read(task_pipe[0], curr_task, sizeof(*curr_task)); //read from task pipe to get a task
 
 	printf("Child (%d): Start the computation...\n", (int)getpid());
 
-	clock_gettime(CLOCK_MONOTONIC, &child_start_compute);
+	clock_gettime(CLOCK_MONOTONIC, &child_start_compute); //record start time
 
 	//computation
-	//printf("Child (%d): start_row = %d, num_of_rows = %d\n", (int)getpid(), curr_task->start_row, curr_task->num_of_rows);
 	for (y=curr_task->start_row; y<(curr_task->start_row + curr_task->num_of_rows); y++) {
 		MSG * curr_msg = malloc(sizeof(*curr_msg));
 		curr_msg->row_index = y; //save row index
     		for (x=0; x<IMAGE_WIDTH; x++) 
 			curr_msg->rowdata[x] = Mandelbrot(x, y); //compute a value for (x, y)
-		curr_msg->child_pid = getpid(); //save pid
 
-		write(data_pipe[1], curr_msg, sizeof(*curr_msg)); //write to pipe
+		if(y+1==curr_task->start_row+curr_task->num_of_rows) //last row,
+			curr_msg->child_pid = getpid(); //inform boss for task
+		else //more message to come
+			curr_msg->child_pid = -1; //don't inform boss for task
+
+		write(data_pipe[1], curr_msg, sizeof(*curr_msg)); //write to data pipe
     	}
 
 	//report compute timing
 	clock_gettime(CLOCK_MONOTONIC, &child_end_compute);
 	float child_difftime = (child_end_compute.tv_nsec - child_start_compute.tv_nsec)/1000000.0 + (child_end_compute.tv_sec - child_start_compute.tv_sec)*1000.0;
 	printf("Child (%d): ... completed. Elapsed time = %.3f ms\n", (int)getpid(), child_difftime);
-	task_completed++;
+	task_completed++; //increases the number of task completed by this process
+	return;
 }
 
 void sigint_handler(int signum) { //signal handler for SIGINT
-	close(data_pipe[1]); //close write end for data pipe of child
-	close(task_pipe[0]); //close read end for task pipe of child	
+	close(data_pipe[1]); //close write end of data pipe of child
+	close(task_pipe[0]); //close read end of task pipe of child	
 	printf("Process %d is interrupted by ^C. Bye Bye\n", (int)getpid());
 	printf("Child process %d terminated and completed %d tasks\n", (int)getpid(), task_completed);
 	exit(0);
@@ -85,9 +86,27 @@ int main( int argc, char* args[] )
 	pipe(data_pipe); //set data pipe
 	pipe(task_pipe); //set task pipe
 
+	signal(SIGINT, sigint_handler); //override SIGINT handler
+	signal(SIGUSR1, sigusr1_handler); //override SIGUSR1 handler
+
+	int * children = (int*)malloc(sizeof(int) * atoi(args[1])); //for storing child pid
+
 	if (argc != 3) { //not enough/too many arguments
 		printf("Invalid argument!\n");
 		printf("Usage: ./part1b-mandelbrot <number of child> <number of rows in a task>\n");
+		exit(0);
+	}
+
+	if (atoi(args[1])>IMAGE_HEIGHT || atoi(args[1]) < 1) { // arguments not within 1~800
+		printf("Number of process is not within 1 to %d, please try again.\n", IMAGE_HEIGHT);
+		exit(0);
+	} else if (atoi(args[2])>IMAGE_HEIGHT || atoi(args[2]) < 1) {
+		printf("Number of line is not within 1 to %d, please try again.\n", IMAGE_HEIGHT);
+		exit(0);
+	}
+
+	if(atoi(args[1])*atoi(args[2])>IMAGE_HEIGHT) {
+		printf("Number of process times number of line is larger than %d, please try again.\n", IMAGE_HEIGHT);
 		exit(0);
 	}
 
@@ -98,9 +117,6 @@ int main( int argc, char* args[] )
 	
 	//data structure to store the start and end times of the computation
 	struct timespec start_compute, end_compute;
-
-	//generate mandelbrot image and store each pixel for later display
-	//each pixel is represented as a value in the range of [0,1]
 	
 	//store the 2D image as a linear array of pixels (in row-major format)
 	float * pixels;
@@ -116,15 +132,10 @@ int main( int argc, char* args[] )
     	int x, y;
 	float difftime, child_difftime;
 	
-	//create childs
-	int * children = (int*)malloc(sizeof(int) * atoi(args[1])); //for storing child pid
 	int rows_to_complete = atoi(args[2]);
-
 	int i, pid;
 
-	signal(SIGINT, sigint_handler); //override SIGINT handler
-	signal(SIGUSR1, sigusr1_handler); //override SIGUSR1 handler
-
+	//create childs
 	for (i=0; i<atoi(args[1]); i++) { 
 		pid = fork();
 		if(pid == 0) //child
@@ -136,12 +147,12 @@ int main( int argc, char* args[] )
 	if(pid > 0) { //==============parent==============
 		int curr_row = 0;
 
-		close(data_pipe[1]); //close write end for data pipe of parent
-		close(task_pipe[0]); //close read end for task pipe of parent	
+		close(data_pipe[1]); //close write end of data pipe of parent
+		close(task_pipe[0]); //close read end of task pipe of parent	
 
 		printf("Start collecting the image lines\n");
 
-		//4th: distribute a task to each worker
+		//distribute a task to each worker
 		TASK * curr_task = malloc(sizeof(*curr_task));
 		for(int j = 0; j < atoi(args[1]); j++) {
 			TASK * curr_task = malloc(sizeof(*curr_task));
@@ -149,23 +160,22 @@ int main( int argc, char* args[] )
 			curr_task->num_of_rows = rows_to_complete;
 	
 			write(task_pipe[1], curr_task, sizeof(*curr_task));
-			kill(children[j], SIGUSR1); //send signal to process
+			kill((pid_t)children[j], SIGUSR1); //send signal to process
 			curr_row += rows_to_complete;
 		}
-		
+
 		int message_received = 0;		
 		MSG * par_msg = malloc(sizeof(*par_msg));
 
-		while(message_received < IMAGE_HEIGHT) {
-			read(data_pipe[0], par_msg, sizeof(*par_msg)); //read from pipe
+		while(message_received < IMAGE_HEIGHT) { //not all message received
+			read(data_pipe[0], par_msg, sizeof(*par_msg)); //read from data pipe
 			message_received++;
 
-			for(int k = 0; k < IMAGE_WIDTH; k++) //copy data to par_msg object
+			for(int k = 0; k < IMAGE_WIDTH; k++) //copy data from par_msg object
 				pixels[par_msg->row_index*IMAGE_WIDTH+k] = par_msg->rowdata[k];
 			
 			//create new task for that child
-			if(par_msg->child_pid != -1) {
-			//if(curr_row < 800) {
+			if(par_msg->child_pid != -1 && curr_row < 800) { //need more task and still have unassigned task
 				TASK * temp_task = malloc(sizeof(*temp_task));
 				temp_task->start_row = curr_row;
 				if(curr_row + rows_to_complete > IMAGE_HEIGHT) { //large than the image
@@ -173,25 +183,21 @@ int main( int argc, char* args[] )
 				} else {
 					temp_task->num_of_rows = rows_to_complete;
 				}
-				int number;
-				for(number = 0; number < atoi(args[1]); number++) { // find num of child
-					if(children[number] == getpid())
-						break;
-				}
-
-				//printf("start_row = %d, num_of_rows = %d\n", temp_task->start_row, temp_task->num_of_rows);
 
 				write(task_pipe[1], temp_task, sizeof(*temp_task));
-				kill(children[number], SIGUSR1); //send signal to process
+				kill((pid_t)par_msg->child_pid, SIGUSR1); //send signal to the process that requests a task
 				curr_row += temp_task->num_of_rows;
 			}
 		}
-		
-		close(task_pipe[1]);
-		close(data_pipe[0]);
 
+		//at this point, all messages are received
+		close(task_pipe[1]); //close write end of task pipe
+		close(data_pipe[0]); //close read end of data pipe
+		
 		for(int j = 0; j < atoi(args[1]); j++) //send SIGINT to all child
 			kill(children[j], SIGINT);
+
+		//at this point, all pipes should be closed
 
 		for(int j = 0; j < atoi(args[1]); j++) //for getrusage(RUSAGE_CHILDREN, &temp) to work
 			waitpid(children[j], NULL, 0);
